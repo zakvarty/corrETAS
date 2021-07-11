@@ -1,0 +1,166 @@
+#' Draws samples from the posterior distribution of the cGPD ETAS model
+#'
+
+#' This function implements a reparameterised version of the latent variable MCMC scheme from (Ross 2016) which draws samples from the Bayesian posterior distribution of the Epidemic Type Aftershock Sequence (ETAS)  model.
+
+#' \deqn{}
+
+#'The ETAS model is widely used to quantify the degree of seismic activity in a geographical region, and to forecast the occurrence of future mainshocks and aftershocks (Ross 2016). The temporal ETAS model is a point process where the probability of an earthquake occurring at time \eqn{t} depends on the previous seismicity \eqn{H_t}{Ht}, and is defined by the conditional intensity function:
+
+#' \deqn{ \lambda(t|H_t) = \mu + \sum_{t[i] < t}  \kappa(m[i]|C,\alpha) h(t[i]|\nu,\xi)}{ \lambda(t|Ht) = \mu + \sum \kappa(m[i]|C,\alpha) h(t[i]|\nu,\xi)}
+
+#' where
+
+#' \deqn{\kappa(m_i|C,\alpha) = Ce^{\alpha \left( m_i-\bar m \right)}}{\kappa(m[i]|C,\alpha) = C * exp(\alpha(m[i]- mean(m)))}
+
+#' and \eqn{ h(t_i|\nu,\xi)} is the generalised Pareto density function reparameterised with \eqn{\nu = \sigma(1+\xi)}.
+
+#' \deqn{}
+
+#' The summation is over all previous earthquakes that occurred in the region, with the i'th such earthquake occurring at time \eqn{ t_i}{t[i]} and having magnitude \eqn{ m_i}{m[i]}. The quantity \eqn{M_0}{M0} denotes the magnitude of completeness of the catalog, so that \eqn{m_i \geq  M_0}{m[i] \ge M0} for all i. The temporal ETAS model has 5 parameters: \eqn{\mu} controls the background rate of seismicity, \eqn{ C} and \eqn{ \alpha} determine the productivity (average number of aftershocks) of an earthquake with magnitude \eqn{m}, and \eqn{\nu} and \eqn{ \xi}  are the parameters of the generalised Pareto distribution and represent the speed at which the aftershock rate decays over time. Each earthquake is assumed to have a magnitude which is an independent draw from the Gutenberg-Richter law \eqn{ p(m_i) = \beta e^{\beta(m_i-M_0)}}{ p(m) = \beta * exp(\beta(m-M0)}.
+
+#' @param ts Vector containing the earthquake times
+#' @param ms Vector containing the earthquake magnitudes
+#' @param m_0 Magnitude of completion. Only required when initval not specified. Is then used to calculate MLE starting point by the direct method.
+#' @param t_max Length of the time window [0,T] the catalog was observed over. If not specified, will be taken as the time of the last earthquake.
+#' @param init_ETAS Initial ETAS parameters at which to start the estimation. If specified, should be a vector, with elements (mu, K, alpha, c, p). If unspecified, the sampler will be initialized at the maximum likelihood estimate of the model parameters
+#' @param init_B Initial branching vector at which to start the estimation. If unspecified, all events will be labelled as process 0.
+#' @param init_mag Inital Magnitude parameters at which to start the estimation.
+#' @param sims Number of posterior samples to draw
+#' @param B_samples Logical. Return samples of branching vector?
+#' @param B_fixed Logical. Sample branching vector as part of mcmc or keep it fixed at init_B?
+#' @param nuxi_t_steps Number of MH steps to attempt at each (nu,xi) update
+#' @param Calpha_steps Number of MH steps to attempt at each (C,alpha) update
+#' @param mag_steps Number of MH steps to attempt at each update of the magnitude distribution
+#' @param etas_sds Vector of standard deviations for Normal transition kernels in (logC, alpha, nu_t, xi_t)
+#' @param mag_sds Vector of standerd deviations for Normal transition kernels in (nu_m,xi_m)
+#' @param mu_prior Vector of parameters (alpha, beta) for the gamma prior distribution on mu
+#' @return A list consisting of
+#'     \item{etas}{A  matrix containing sampled Omori ETAS parameter values. Each row is a single sample, and the columns correspond to (mu, C, alpha, nu, xi)}
+#'     \item{b}{A matrix containing sampled Branching vectors. Each row is a single sample,and the columns correspond to earthquakes}
+#'     \item{mag}{A matrix containing sampled nu-GPD magnitude parameter values. Each row is a single sample and the columns correspond to (nu,xi)}
+#' @author Zak Varty
+#' @export
+sampleETASposterior <- function(ts, ms, m_0, t_max = NULL, init_ETAS = NULL, init_B = rep(0,length(ts)), init_mag = NULL, sims = 5000, B_samples = FALSE, B_fixed = FALSE, nuxi_t_steps=500, Calpha_steps=100, mag_steps=100, etas_sds=rep(0.1,4), mag_sds=rep(0.1,2), mu_prior=c(0.1,0.1)) {
+  #--- input checks
+    if (is.null(t_max)) {t_max <- max(ts)}
+
+    if(any(etas_sds <= 0, !is.numeric(etas_sds))){
+      stop("Error in `etas_sds`: Standard deviations must be positive and numeric.")
+    }
+
+    if(any(mag_sds <= 0, !is.numeric(mag_sds))){
+      stop("Error in `mag_sds`: Standard deviations must be positive and numeric.")
+    }
+
+    if(any(mu_prior <= 0, !is.numeric(mu_prior))){
+      stop("Error in `muprior`: Gamma parameters must be positive and numeric. ")
+    }
+
+    if(any(ms < m_0)){
+      stop("Error in `ms`: All values must be at least m_0.")
+    }
+
+    #--- find starting values if missing
+   if(is.null(init_mag)){
+     cat("No initial magnitude parameters passed. Computing maximum likelihood estimate... \n")
+     init_mag <- maxLikelihoodGPD(
+                x = ms,
+                nuxi = c(1,0),
+                mu = m_0
+                )$params
+     cat("Maximum likelihood estimate for magnitude parameters is: \n")
+     print(init_mag)
+     cat("Will use this for inital value. \n\n")
+   }
+
+   if (is.null(init_ETAS)) {
+    cat("No initial ETAS parameters passed. Computing maximum likelihood estimate... \n")
+    n <- length(ts)
+    t_max_optim<- t_max
+    if (n > 500) {
+      n <- 500
+      t_max_optim <- ts[500]
+    }
+    init_ETAS <- maxLikelihoodETAScGPD(
+                ts = ts[1:n],
+                magnitudes = ms[1:n],
+                M0 = m_0,
+                maxTime = t_max_optim,
+                displayOutput=FALSE,
+                constrainOmori = FALSE)$params
+    cat("Maximum likelihood estimate for ETAS parameters is: \n")
+    print(init_ETAS)
+    cat("Will use this for initial value \n\n")
+   }
+
+  #--- MCMC setup
+  branching <- init_B
+  mu    <- init_ETAS[1]
+  C     <- init_ETAS[2]
+  alpha <- init_ETAS[3]
+  nu_t  <- init_ETAS[4]
+  xi_t  <- init_ETAS[5]
+  nu_m  <- init_mag[1]
+  xi_m  <- init_mag[2]
+
+  B_size <-  B_samples * sims * length(ts)
+
+  cat(sprintf("Starting Gibbs sampler. Will draw %s posterior samples... \n",sims))
+  out <- NULL
+
+  #--- MCMC Exported to C++ via C
+  cat("Using estimateETAS_Cpp via estimateETAS_C. \n")
+    res <- .C("estimateETAS_C",
+              ts=as.double(ts),
+              marks=as.double(ms),
+              branching=as.integer(branching),
+              n=as.integer(length(ts)),
+              M0 = as.double(m_0),
+              maxTime = as.double(t_max),
+              sims=as.integer(sims),
+              Bsamples=as.integer(B_samples),
+              Bfixed=as.integer(B_fixed),
+              Bsize=as.integer(B_size),
+              nuxiSteps=as.integer(nuxi_t_steps),
+              CaSteps=as.integer(Calpha_steps),
+              magSteps=as.integer(mag_steps),
+              mu=as.double(mu),
+              logC=as.double(log(C)),
+              alpha=as.double(alpha),
+              nut=as.double(nu_t),
+              xit=as.double(xi_t),
+              num=as.double(nu_m),
+              xim=as.double(xi_m),
+              etasstepSds=as.double(etas_sds),
+              magstepSds=as.double(mag_sds),
+              muprior=as.double(mu_prior),
+              constrainOmori = as.integer(FALSE),
+              mus=as.double(numeric(sims)),
+              logCs=as.double(numeric(sims)),
+              alphas=as.double(numeric(sims)),
+              nuts=as.double(numeric(sims)),
+              xits=as.double(numeric(sims)),
+              nums=as.double(numeric(sims)),
+              xims=as.double(numeric(sims)),
+              Bs=as.integer(numeric(B_size)),
+              PACKAGE="corrETAS")
+
+    #--- Formatting samples into output
+    etas_samples <- data.frame(mu = res$mus,
+                               C = res$logCs,
+                               alpha = res$alphas,
+                               nu_t = res$nuts,
+                               xi_t = res$xits)
+    branching_samples <- matrix(res$Bs, ncol = length(ts), byrow = TRUE)
+    mag_samples <- data.frame(nu_m = res$nums, xi_m = res$xims)
+
+
+    etas_samples[,2] <- exp(etas_samples[,2])
+
+    out <- list(etas = etas_samples,
+                mag = mag_samples,
+                b = branching_samples)
+  return(out)
+}
+

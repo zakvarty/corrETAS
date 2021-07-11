@@ -1,0 +1,11 @@
+Package: corrETAS
+Type: Package
+Title: Title: Bayesian Estimation of the ETAS Model for Earthquakes with Dependent Magnitudes
+Version: 0.0.1
+Author: Zak Varty
+Maintainer: Zak Varty <z.varty@lancaster.ac.uk>
+Description: This package provides routines for simulation and user-tunable Bayesian estimation of the temporal ETAS model with magnitude dependence based on the branching structure of the process. Implementations are provided for Generalised Pareto magnitude distributions coupled by either an independence or gaussian copula. 
+License: GPL-3
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.0.2
